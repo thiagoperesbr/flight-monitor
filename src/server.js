@@ -112,6 +112,32 @@ async function fetchSearchFlights(
   }
 }
 
+async function fetchNextFlights(next_token) {
+  try {
+    const options = {
+      method: "GET",
+      url: "https://google-flights2.p.rapidapi.com/api/v1/getNextFlights",
+      params: {
+        next_token,
+        show_hidden: "1",
+        currency: "BRL",
+        language_code: "pt-BR",
+        country_code: "BR",
+      },
+      headers: {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": "google-flights2.p.rapidapi.com",
+      },
+    };
+
+    const response = await axios.request(options);
+    return response.data.data;
+  } catch (err) {
+    console.error("Erro ao buscar voos com next_token:", err.message);
+    return [];
+  }
+}
+
 async function sendTelegramMessage(message) {
   try {
     await bot.sendMessage(CHAT_ID, message, { parse_mode: "Markdown" });
@@ -124,85 +150,115 @@ const destinations = [
   { departure_id: "GIG", arrival_id: "SSA", destino: "Salvador" },
   { departure_id: "GIG", arrival_id: "REC", destino: "Recife" },
   { departure_id: "GIG", arrival_id: "MCZ", destino: "Maceió" },
-]
+];
 
-cron.schedule("* * * * *", async () => {
+cron.schedule("0 */4 * * *", async () => {
   console.log("Verificando passagens...");
 
   try {
-    for (const {departure_id, arrival_id, destino} of destinations) {
-      console.log(`Verificando voos de Rio de Janeiro (${departure_id}) para ${destino} (${arrival_id})`)
-  
-      const calendarPicker = await fetchCalendarPicker(departure_id, arrival_id);
-  
-      const filteredFlights = calendarPicker.filter((picker) => picker.price < 700);
-  
+    for (const { departure_id, arrival_id, destino } of destinations) {
+      console.log(
+        `Verificando voos de ida/volta do Rio de Janeiro (${departure_id}) para ${destino} (${arrival_id})`
+      );
+
+      const calendarPicker = await fetchCalendarPicker(
+        departure_id,
+        arrival_id
+      );
+
+      const filteredFlights = calendarPicker.filter(
+        (picker) => picker.price < 700
+      );
+
       if (filteredFlights.length === 0) {
-        console.log(`Nenhum voo do Rio de Janeiro para ${destino} abaixo de R$ 700 reais encontrado.`);
+        console.log(
+          `Nenhum voo de ida/volta do Rio de Janeiro para ${destino} abaixo de R$ 700 reais encontrado.`
+        );
         continue;
       }
-  
+
       for (const filterflight of filteredFlights) {
-        const flights = await fetchSearchFlights(
+        let consolidatedMessage =
+          `✈️ *Oferta de Passagem Aérea Encontrada!*\n\n` +
+          `- *Origem:* Rio de Janeiro (${departure_id})\n` +
+          `- *Destino:* ${destino} (${arrival_id})\n` +
+          `- *Data Ida:* ${formatDate(filterflight.departure)}\n` +
+          `- *Data Volta:* ${formatDate(filterflight.return)}\n` +
+          `- *Total (ida/volta):* R$ ${filterflight.price.toFixed(2)}\n\n`;
+
+        const flightsIda = await fetchSearchFlights(
           departure_id,
           arrival_id,
           filterflight.departure,
           filterflight.return
         );
-  
-        const allFlights = [
-          ...(flights.itineraries?.topFlights || []),
-          ...(flights.itineraries?.otherFlights || [])
-        ]
-  
-        const matchingFlights = allFlights.filter((flight) => {
+
+        const nextToken = flightsIda.itineraries?.topFlights[0].next_token;
+
+        const allFlightsIda = [
+          ...(flightsIda.itineraries?.topFlights || []),
+          ...(flightsIda.itineraries?.otherFlights || []),
+        ];
+
+        const matchingFlightsIda = allFlightsIda.filter((flight) => {
           const isPriceMatch = flight.price === filterflight.price;
           const isDirect = !flight.layovers;
-          const hasShortLayover = flight.layovers && flight.layovers.length === 1 && flight.layovers[0].duration <= 90;
-  
-          return isPriceMatch && (isDirect || hasShortLayover);
-        })
-  
-        if (matchingFlights.length > 0) {
-          let consolidatedMessage =
-            `✈️ *Oferta de Passagem Aérea Encontrada!*\n\n` +
-            `- *Origem:* Rio de Janeiro (${departure_id})\n` +
-            `- *Destino:* ${destino} (${arrival_id})\n` +
-            `- *Data Ida:* ${formatDate(filterflight.departure)}\n` +
-            `- *Data Volta:* ${formatDate(filterflight.return)}\n` +
-            `- *Total (ida/volta):* R$ ${filterflight.price.toFixed(2)}\n\n`;
-  
-          matchingFlights.forEach((flight, index) => {
-            let layoverInfo;
-  
-            if (!flight.layovers) {
-              layoverInfo = "Direto";
-            } else if (flight.layovers.length === 1) {
-              layoverInfo = `1 parada (${flight.layovers[0].duration_label})`;
-            } 
-  
+
+          return isPriceMatch && isDirect;
+        });
+
+        if (matchingFlightsIda.length > 0) {
+          matchingFlightsIda.forEach((flight, index) => {
             consolidatedMessage +=
-              `*Voo ${index + 1}:*\n` +
+              `*Voo de IDA ${index + 1}:*\n` +
               `- *Companhia Aérea:* ${flight.flights[0].airline}\n` +
               `- *Horário de Partida:* ${formatTime(flight.departure_time)}\n` +
               `- *Horário de Chegada:* ${formatTime(flight.arrival_time)}\n` +
               `- *Duração:* ${flight.duration?.text || "Indisponível"}\n` +
-              `- *Paradas:* ${layoverInfo}\n\n`;
+              `- *Tipo:* Direto\n\n`;
           });
-  
-          await sendTelegramMessage(consolidatedMessage);
         } else {
-          console.log(`Nenhum voo correspondente encontrado do Rio de Janeiro para ${destino}.`);
+          console.log("Nenhum voo de ida correspondente encontrado.");
         }
+
+        const flightsVolta = await fetchNextFlights(nextToken);
+
+        const allFlightsVolta = [
+          ...(flightsVolta.itineraries?.topFlights || []),
+          ...(flightsVolta.itineraries?.otherFlights || []),
+        ];
+
+        const matchingFlightsVolta = allFlightsVolta.filter((flight) => {
+          const isPriceMatch = flight.price === filterflight.price;
+          const isDirect = !flight.layovers;
+
+          return isPriceMatch && isDirect;
+        });
+
+        if (matchingFlightsVolta.length > 0) {
+          matchingFlightsVolta.forEach((flight, index) => {
+            consolidatedMessage +=
+              `*Voo de VOLTA ${index + 1}:*\n` +
+              `- *Companhia Aérea:* ${flight.flights[0].airline}\n` +
+              `- *Horário de Partida:* ${formatTime(flight.departure_time)}\n` +
+              `- *Horário de Chegada:* ${formatTime(flight.arrival_time)}\n` +
+              `- *Duração:* ${flight.duration?.text || "Indisponível"}\n` +
+              `- *Tipo:* Direto\n\n`;
+          });
+        } else {
+          console.log("Nenhum voo de volta correspondente encontrado.");
+        }
+
+        await sendTelegramMessage(consolidatedMessage);
       }
     }
-    
-    console.log("Concluída a verificação das passagens.")
+
+    console.log("Concluída a verificação das passagens.");
   } catch (err) {
-    console.error("Ocorreu um erro durante a verificação das passagens.")
+    console.error("Ocorreu um erro durante a verificação das passagens.");
   }
 });
 
-app.listen(8800, () => {
-  console.log("Server running on port 8800.");
+app.listen(8801, () => {
+  console.log("Server running on port 8801.");
 });
